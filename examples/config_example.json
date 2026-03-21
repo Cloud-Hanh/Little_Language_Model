@@ -1,0 +1,9 @@
+{
+  "input": "examples/tiny_corpus.jsonl",
+  "output": "artifacts/dictionary",
+  "text_key": "text",
+  "min_n": 1,
+  "max_n": 3,
+  "seed": "午后",
+  "max_steps": 20
+}

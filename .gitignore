@@ -1,0 +1,21 @@
+__pycache__/
+.venv/
+.vscode/
+
+# Data and generated artifacts
+data/raw/
+data/processed/
+artifacts/
+dictionary/
+outputs/
+checkpoints/
+*.egg-info/
+
+# Temp / archives
+*.tmp
+*.zip
+archive/
+
+# JSONL policy: ignore by default, keep tiny demo
+*.jsonl
+!examples/tiny_corpus.jsonl
