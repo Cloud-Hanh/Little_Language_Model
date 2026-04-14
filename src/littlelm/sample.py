@@ -15,6 +15,8 @@ from .constants import (
     DEFAULT_N_SELECTION_MODE,
     DEFAULT_N_TEMPERATURE,
     DEFAULT_PROMPT_MODE,
+    DEFAULT_REPETITION_PENALTY,
+    DEFAULT_REPETITION_WINDOW,
     DEFAULT_TEMPERATURE,
     DEFAULT_TOP_K,
     DEFAULT_TOP_P,
@@ -46,7 +48,8 @@ class GenerationConfig:
     fixed_n: int | None = None
     n_weights: dict[int, float] | None = None
     n_temperature: float = DEFAULT_N_TEMPERATURE
-    max_try: int = 50
+    repetition_penalty: float = DEFAULT_REPETITION_PENALTY
+    repetition_window: int = DEFAULT_REPETITION_WINDOW
 
 
 def infer_n_from_filename(filename: str | Path) -> int | None:
@@ -188,6 +191,19 @@ def apply_top_p(candidates: list[tuple[str, float]], p: float) -> list[tuple[str
     return picked
 
 
+def apply_repetition_penalty(
+    candidates: list[tuple[str, float]],
+    recent_text: str,
+    penalty: float,
+    window: int = DEFAULT_REPETITION_WINDOW,
+) -> list[tuple[str, float]]:
+    """对最近生成过的字符降权，抑制重复。penalty=1.0 表示不惩罚。"""
+    if penalty <= 1.0:
+        return list(candidates)
+    recent = set(recent_text[-window:])
+    return [(char, prob / penalty if char in recent else prob) for char, prob in candidates]
+
+
 def parse_n_weights(spec: str) -> dict[int, float]:
     weights: dict[int, float] = {}
     text = (spec or "").strip()
@@ -320,7 +336,6 @@ def predict_next_char(
     context: str,
     ngrams_count_folder: str | Path,
     max_n: int = 10,
-    max_try: int = 50,
     debug: bool = False,
 ) -> tuple[str, StepDebugInfo | None]:
     if not isinstance(context, str):
@@ -330,7 +345,7 @@ def predict_next_char(
     if not ngrams_count or not ngrams_count[0]:
         return "", None
 
-    config = GenerationConfig(max_n=max_n, max_try=max_try)
+    config = GenerationConfig(max_n=max_n)
 
     max_available = len(ngrams_count)
     max_k = min(len(context) + 1, config.max_n, max_available)
@@ -338,27 +353,22 @@ def predict_next_char(
         return "", None
 
     available_n = list(range(1, max_k + 1))
-    chosen_n = 1
-    n_distribution: list[tuple[int, float]] = []
-    raw_candidates: list[tuple[str, float]] = []
 
-    for _ in range(config.max_try):
-        if not available_n:
-            break
-        n_distribution = build_n_selection_distribution(available_n, mode="weighted")
-        chosen_n = sample_n_value(n_distribution)
-        raw_candidates = _candidate_char_distribution_for_n(context, chosen_n, ngrams_count)
-        raw_candidates = normalize_distribution(raw_candidates)
+    # 从分布中采样首选 n，然后确定性地逐级回退直到找到候选
+    n_distribution = build_n_selection_distribution(available_n, mode="weighted")
+    chosen_n = sample_n_value(n_distribution)
+
+    raw_candidates: list[tuple[str, float]] = []
+    for try_n in range(chosen_n, 0, -1):
+        raw_candidates = normalize_distribution(
+            _candidate_char_distribution_for_n(context, try_n, ngrams_count)
+        )
         if raw_candidates:
+            chosen_n = try_n
             break
-        available_n = [n for n in available_n if n != chosen_n]
 
     if not raw_candidates:
-        chosen_n = 1
-        n_distribution = [(1, 1.0)]
-        raw_candidates = normalize_distribution(_candidate_char_distribution_for_n(context, 1, ngrams_count))
-        if not raw_candidates:
-            return "", None
+        return "", None
 
     final_candidates = sorted(raw_candidates, key=lambda item: item[1], reverse=True)
     chosen_char = random.choices([c for c, _ in final_candidates], weights=[p for _, p in final_candidates], k=1)[0]
@@ -397,6 +407,8 @@ def generate_text(
     fixed_n: int | None = None,
     n_weights: dict[int, float] | None = None,
     n_temperature: float = DEFAULT_N_TEMPERATURE,
+    repetition_penalty: float = DEFAULT_REPETITION_PENALTY,
+    repetition_window: int = DEFAULT_REPETITION_WINDOW,
     verbosity: str = DEFAULT_VERBOSITY,
     return_debug: bool = False,
 ) -> str | tuple[str, list[StepDebugInfo]]:
@@ -414,6 +426,8 @@ def generate_text(
         fixed_n=fixed_n,
         n_weights=n_weights,
         n_temperature=n_temperature,
+        repetition_penalty=repetition_penalty,
+        repetition_window=repetition_window,
     )
 
     if config.temperature <= 0:
@@ -424,6 +438,8 @@ def generate_text(
         raise ValueError("top-p must be in (0, 1]")
     if config.n_temperature <= 0:
         raise ValueError("n-temperature must be > 0")
+    if config.repetition_penalty < 1.0:
+        raise ValueError("repetition-penalty must be >= 1.0")
     if config.n_selection_mode == "fixed" and config.fixed_n is None:
         raise ValueError("fixed-n is required when n-selection-mode=fixed")
     if config.n_selection_mode == "manual" and not config.n_weights:
@@ -440,36 +456,32 @@ def generate_text(
             break
 
         available_n = list(range(1, max_k + 1))
-        chosen_n = 1
-        n_distribution: list[tuple[int, float]] = []
+
+        # 从分布中采样首选 n，然后确定性地逐级回退直到找到候选
+        n_distribution = build_n_selection_distribution(
+            available_n,
+            mode=config.n_selection_mode,
+            n_temperature=config.n_temperature,
+            fixed_n=config.fixed_n,
+            manual_weights=config.n_weights,
+        )
+        chosen_n = sample_n_value(n_distribution)
+
         raw_candidates: list[tuple[str, float]] = []
-
-        for _ in range(config.max_try):
-            if not available_n:
-                break
-            n_distribution = build_n_selection_distribution(
-                available_n,
-                mode=config.n_selection_mode,
-                n_temperature=config.n_temperature,
-                fixed_n=config.fixed_n,
-                manual_weights=config.n_weights,
+        for try_n in range(chosen_n, 0, -1):
+            raw_candidates = normalize_distribution(
+                _candidate_char_distribution_for_n(text, try_n, ngrams_count)
             )
-            chosen_n = sample_n_value(n_distribution)
-            raw_candidates = _candidate_char_distribution_for_n(text, chosen_n, ngrams_count)
-            raw_candidates = normalize_distribution(raw_candidates)
             if raw_candidates:
+                chosen_n = try_n
                 break
-            available_n = [n for n in available_n if n != chosen_n]
-
-        if not raw_candidates:
-            chosen_n = 1
-            n_distribution = [(1, 1.0)]
-            raw_candidates = normalize_distribution(_candidate_char_distribution_for_n(text, 1, ngrams_count))
 
         if not raw_candidates:
             break
 
         candidates = normalize_distribution(raw_candidates)
+        candidates = apply_repetition_penalty(candidates, text, config.repetition_penalty, config.repetition_window)
+        candidates = normalize_distribution(candidates)
         candidates = apply_temperature(candidates, config.temperature)
         candidates = normalize_distribution(candidates)
         candidates = apply_top_k(candidates, config.top_k)
@@ -586,6 +598,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fixed-n", type=int, help="Fixed n value when n-selection-mode=fixed.")
     parser.add_argument("--n-weights", help="Manual n weights, for example: 1:0.1,2:0.2,3:0.7")
     parser.add_argument("--n-temperature", type=float, default=DEFAULT_N_TEMPERATURE, help="Temperature for n selection distribution.")
+    parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=DEFAULT_REPETITION_PENALTY,
+        help="Divide probability of recently-seen chars by this factor (1.0 = disabled, >1.0 = penalize).",
+    )
+    parser.add_argument(
+        "--repetition-window",
+        type=int,
+        default=DEFAULT_REPETITION_WINDOW,
+        help="Number of recent characters to consider for repetition penalty.",
+    )
     parser.add_argument("--debug", action="store_true", help="Print debug candidate info.")
     return parser
 
@@ -626,6 +650,8 @@ def main(argv: list[str] | None = None) -> int:
         fixed_n=args.fixed_n,
         n_weights=manual_weights,
         n_temperature=args.n_temperature,
+        repetition_penalty=args.repetition_penalty,
+        repetition_window=args.repetition_window,
         verbosity=verbosity,
         return_debug=True,
     )
@@ -655,6 +681,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  n_selection_mode: {args.n_selection_mode}")
     print(f"  fixed_n: {args.fixed_n}")
     print(f"  n_temperature: {args.n_temperature}")
+    print(f"  repetition_penalty: {args.repetition_penalty}")
+    print(f"  repetition_window: {args.repetition_window}")
     print("")
 
     for info in step_infos:

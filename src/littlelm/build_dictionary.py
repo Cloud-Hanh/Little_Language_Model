@@ -12,7 +12,10 @@ from .constants import DEFAULT_FLUSH_THRESHOLD, DEFAULT_TEXT_KEY
 from .reader import iter_jsonl
 from .utils import ensure_parent_dir, safe_replace
 
-_SPLIT_RE = re.compile(r"[ \u3000\xa0\r\n]+")
+# 空白分隔符（片段内部不跨空白构建 n-gram）
+_SPACE_RE = re.compile(r"[ \u3000\xa0\r\n]+")
+# 句末标点作为边界：n-gram 不跨句末标点，但标点本身保留为独立片段供 1-gram 统计
+_SENT_BOUNDARY_RE = re.compile(r"([。！？…]+)")
 
 
 def split_text(text: str) -> list[str]:
@@ -20,7 +23,16 @@ def split_text(text: str) -> list[str]:
         return []
     if not isinstance(text, str):
         text = str(text)
-    return [part for part in _SPLIT_RE.split(text) if part]
+    fragments: list[str] = []
+    # 先按句末标点切割，capture group 让标点留在结果里成为独立片段
+    for part in _SENT_BOUNDARY_RE.split(text):
+        if not part:
+            continue
+        # 再按空白切割
+        for sub in _SPACE_RE.split(part):
+            if sub:
+                fragments.append(sub)
+    return fragments
 
 
 def iter_ngrams_from_text(text: str, gram_size: int) -> Iterator[str]:
