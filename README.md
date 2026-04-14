@@ -149,6 +149,8 @@ archive/             # legacy archived scripts
 - `--fixed-n`: fixed n when mode is `fixed`.
 - `--n-weights`: manual n weights when mode is `manual`.
 - `--n-temperature`: temperature on n-selection distribution.
+- `--repetition-penalty`: divide probability of recently-seen characters by this factor (`1.0` = disabled, recommended range `1.2`–`1.5`).
+- `--repetition-window`: number of recent characters considered for repetition penalty (default `20`).
 
 ## Verbosity modes
 
@@ -167,10 +169,11 @@ archive/             # legacy archived scripts
 Character sampling applies in this order:
 
 1. raw conditional probabilities
-2. `temperature`
-3. `top-k`
-4. `top-p`
-5. renormalize and sample
+2. `repetition-penalty`
+3. `temperature`
+4. `top-k`
+5. `top-p`
+6. renormalize and sample
 
 For n-value selection:
 
@@ -183,6 +186,12 @@ For n-value selection:
 - Fixed line-range reader bug from legacy jsonl reader script.
 - Fixed global variable dependency in legacy JSONL character search printer.
 - Removed hard-coded local Windows paths from runnable code.
+
+## Improvements
+
+- **Backoff chain**: when the sampled n-gram order yields no candidates, the model now deterministically backs off to n-1, n-2, … down to 1 instead of random retrying. This ensures the longest valid context is always used first.
+- **Sentence boundary awareness**: training splits text on sentence-ending punctuation (`。！？…`) so n-grams never cross sentence boundaries. Punctuation characters are still counted as unigrams.
+- **Repetition penalty**: new `--repetition-penalty` parameter down-weights characters that appeared recently in the generated text, reducing repetitive output. Use `--repetition-window` to control how many recent characters are considered.
 
 ## Contributing
 
